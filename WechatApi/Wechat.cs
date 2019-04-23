@@ -42,6 +42,8 @@ namespace Wechat
 
         private Thread m_syncThread;
 
+        private string user_agnet = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36";
+
         public Wechat(PictureBox codeShow) {
             cookieContainer = new CookieContainer();
             qrcode_img = codeShow;
@@ -49,7 +51,11 @@ namespace Wechat
 
         private string getTimeStamp()
         {
-            return Convert.ToInt32((DateTime.UtcNow.Subtract(new DateTime(1970, 1, 1))).TotalSeconds).ToString();
+            return getTimeStampInt32().ToString();
+        }
+
+        private Int32 getTimeStampInt32() {
+            return Convert.ToInt32((DateTime.UtcNow.Subtract(new DateTime(1970, 1, 1))).TotalSeconds);
         }
 
         private bool GetUUID() {
@@ -74,16 +80,25 @@ namespace Wechat
             return false;
         }
 
-        private HttpWebResponse Get(string url, ref string responseText) {
-            var http = WebRequest.Create(url) as HttpWebRequest;
-            http.Method = "Get";
-            http.CookieContainer = cookieContainer;
-            HttpWebResponse response = http.GetResponse() as HttpWebResponse;
-            using (var reader = new System.IO.StreamReader(response.GetResponseStream(), new UTF8Encoding(true, true)))
+        private HttpWebResponse Get(string url, ref string responseText,int timeout = 5) {
+            try
             {
-                responseText = reader.ReadToEnd();
+                var http = WebRequest.Create(url) as HttpWebRequest;
+                http.Method = "Get";
+                http.Timeout = timeout * 1000;
+                http.CookieContainer = cookieContainer;
+                http.UserAgent = user_agnet;
+                HttpWebResponse response = http.GetResponse() as HttpWebResponse;
+                using (var reader = new StreamReader(response.GetResponseStream(), new UTF8Encoding(true, true)))
+                {
+                    responseText = reader.ReadToEnd();
+                }
+                return response;
             }
-            return response;
+            catch (WebException e) {
+                throw e;
+            }
+            return null;
         }
 
 
@@ -98,34 +113,41 @@ namespace Wechat
 
         private HttpWebResponse Post(string url,string data, ref Dictionary<string,dynamic> json)
         {
-            byte[] byteArray = Encoding.UTF8.GetBytes(data);
-
-            var request = WebRequest.Create(url) as HttpWebRequest;
-            request.CookieContainer = cookieContainer;
-            request.ContentType = "application/json; charset=UTF-8";
-            request.Method = "POST";
-            request.ContentLength = byteArray.Length;
-        
-            Stream dataStream = request.GetRequestStream();
-            dataStream.Write(byteArray, 0, byteArray.Length);
-            dataStream.Close();
-
-            HttpWebResponse response = request.GetResponse() as HttpWebResponse;
-
-            string serverResponse = "";
-            using (var responseStream = response.GetResponseStream())
+            try
             {
-                if (responseStream != null)
+                byte[] byteArray = Encoding.UTF8.GetBytes(data);
+                HttpWebRequest request = WebRequest.Create(url) as HttpWebRequest;
+                request.CookieContainer = cookieContainer;
+                request.ContentType = "application/json; charset=UTF-8";
+                request.Method = "POST";
+                request.ContentLength = byteArray.Length;
+                request.UserAgent = user_agnet;
+
+                Stream dataStream = request.GetRequestStream();
+                dataStream.Write(byteArray, 0, byteArray.Length);
+                dataStream.Close();
+
+                HttpWebResponse response = request.GetResponse() as HttpWebResponse;
+
+                string serverResponse = "";
+                using (var responseStream = response.GetResponseStream())
                 {
-                    using (var responseStreamReader = new StreamReader(responseStream))
+                    if (responseStream != null)
                     {
-                        serverResponse = responseStreamReader.ReadToEnd();
+                        using (var responseStreamReader = new StreamReader(responseStream))
+                        {
+                            serverResponse = responseStreamReader.ReadToEnd();
+                        }
                     }
                 }
+                var deserializer = new JavaScriptSerializer();
+                json = deserializer.Deserialize<Dictionary<string, dynamic>>(serverResponse);
+                return response;
             }
-            var deserializer = new JavaScriptSerializer();
-            json = deserializer.Deserialize<Dictionary<string, dynamic>>(serverResponse);
-            return response;
+            catch (WebException e) {
+                throw e;
+            }
+ 
         }
 
         //显示微信登录二维码
@@ -195,25 +217,31 @@ namespace Wechat
         //登录微信
         private bool login()
         {
-            string responseText = "";
-            HttpWebResponse response = Get(redirect_url, ref responseText);
-            XmlDocument doc = new XmlDocument();
-            doc.LoadXml(responseText);
-            var root = doc.DocumentElement;
-            skey = root.SelectSingleNode("skey").InnerText;
-            wxsid = root.SelectSingleNode("wxsid").InnerText;
-            wxuin = root.SelectSingleNode("wxuin").InnerText;
-            pass_ticket = root.SelectSingleNode("pass_ticket").InnerText;
-            foreach (Cookie cookie in response.Cookies)
-            {
-                Console.WriteLine(String.Format("Cookie_in_login: {0}: {1}", cookie.Name, cookie.Value));
-            }
+            try {
+                string responseText = "";
+                HttpWebResponse response = Get(redirect_url, ref responseText);
+                XmlDocument doc = new XmlDocument();
+                doc.LoadXml(responseText);
+                XmlElement root = doc.DocumentElement;
+                skey = root.SelectSingleNode("skey").InnerText;
+                wxsid = root.SelectSingleNode("wxsid").InnerText;
+                wxuin = root.SelectSingleNode("wxuin").InnerText;
+                pass_ticket = root.SelectSingleNode("pass_ticket").InnerText;
+                foreach (Cookie cookie in response.Cookies)
+                {
+                    Console.WriteLine(String.Format("Cookie_in_login: {0}: {1}", cookie.Name, cookie.Value));
+                }
 
-            if (String.IsNullOrEmpty(skey) || String.IsNullOrEmpty(wxsid) || String.IsNullOrEmpty(wxuin) || String.IsNullOrEmpty(pass_ticket))
-            {
-                return false;
+                if (String.IsNullOrEmpty(skey) || String.IsNullOrEmpty(wxsid) || String.IsNullOrEmpty(wxuin) || String.IsNullOrEmpty(pass_ticket))
+                {
+                    return false;
+                }
+                return true;
             }
-            return true;
+            catch(Exception e){
+                Console.WriteLine(e.Message);
+            }
+            return false;
         }
 
         //初始化微信协议
@@ -253,8 +281,8 @@ namespace Wechat
         //获取联系人
         private List<Dictionary<string, dynamic>> webwxgetcontact()
         {
-            var url = base_url + String.Format("webwxgetcontact?pass_ticket={0}&skey={1}&r={2}", pass_ticket, skey, getTimeStamp());
-            var http = WebRequest.Create(url) as HttpWebRequest;
+            string url = base_url + String.Format("webwxgetcontact?pass_ticket={0}&skey={1}&r={2}", pass_ticket, skey, getTimeStamp());
+            HttpWebRequest http = WebRequest.Create(url) as HttpWebRequest;
 #if (DEBUG)
             //Uri target = new Uri("https://wx.qq.com");
             //cookieContainer.Add(new Cookie("mm_lang", "zh_CN") { Domain = target.Host });
@@ -338,39 +366,44 @@ namespace Wechat
             }
 
             testSyncCheck();
-            m_syncThread = new System.Threading.Thread(SyncMsgThread);
+            m_syncThread = new Thread(SyncMsgThread);
             m_syncThread.Start();
             return true;
         }
 
         private string syncHost;
 
-        private bool syncCheck() {
-            Console.WriteLine("sync check");
+        private bool syncCheck(ref int selector) {
             var timeStamp = getTimeStamp();
             string url = "https://" + syncHost + String.Format("/cgi-bin/mmwebwx-bin/synccheck?r={0}&sid={1}&uin={2}&skey={3}&deviceid={4}&synckey={5}&_={6}", timeStamp,wxsid,wxuin,skey,deviceId,synckey,timeStamp);
-            string responseText = "";
-            Get(url,ref responseText);
-            Console.WriteLine(responseText);
-            if (responseText.Length == 0)
+            try
             {
-                return false;
-            }
-            else {
-                var regex = @"window\.synccheck=";
+                string responseText = "";
+                var response = Get(url, ref responseText);
+                Console.WriteLine("sync check " + responseText);
+                var regex = @"window\.synccheck=\{retcode:""(\d+)"",selector:""(\d+)""\}";
                 var r = new Regex(regex, RegexOptions.None);
                 Match m = r.Match(responseText);
                 if (m.Success)
                 {
-                    return true;
+                    int retCode = int.Parse(m.Groups[1].Value);
+                    selector = int.Parse(m.Groups[2].Value);
+                    return retCode == 0;
+                }
+                else
+                {
+                    return false;
                 }
             }
-      
-            return true;
+            catch (Exception e) {
+                Console.WriteLine(e.Message + " " +  syncHost);
+            }
+            return false;
         }
 
         private void testSyncCheck() {
-            string[] hosts = new string[]{"wx2.qq.com",
+            string[] hosts = new string[]{
+                    "wx2.qq.com",
                     "webpush.wx2.qq.com",
                     "wx8.qq.com",
                     "webpush.wx8.qq.com",
@@ -388,17 +421,39 @@ namespace Wechat
                     "webpush2.wx.qq.com" };
             for (var i = 0; i < hosts.Length; i++) {
                 syncHost = hosts[i];
-                if (this.syncCheck()) {
+                int selector = 0;
+                if (syncCheck(ref selector)) {
                     return ;
                 }
             }
+        }
 
+        private void syncMsg() {
+            string url = this.base_url + String.Format("webwxsync?sid={0}&skey={1}&pass_ticket={2}", wxsid, skey, pass_ticket);
+
+            var serializer = new JavaScriptSerializer();
+            var base_req_param = new { Uin = Int64.Parse(wxuin), Sid = wxsid, Skey = skey, DeviceID = deviceId };
+            var timestamp = getTimeStampInt32();
+            var payload = serializer.Serialize(new
+            {
+                BaseRequest = base_req_param,
+                SyncKey = System.Web.HttpUtility.UrlEncode(this.synckey),
+                rr = timestamp
+            });
+
+            var dict = new Dictionary<string, dynamic>();
+            Post(url, payload, ref dict);
         }
 
         private void SyncMsgThread() {
             while (true) {
-                syncCheck();
-                Thread.Sleep(10000);
+                int selector = 0;
+                if (syncCheck(ref selector)) {
+                    if (selector == 2) {
+                        syncMsg();
+                    }
+                }
+                Thread.Sleep(5000);
             }
         }
     }
