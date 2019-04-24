@@ -36,17 +36,38 @@ namespace Wechat
 
         private string synckey;
 
+        private Dictionary<string, dynamic> synckeyObj;
+
         private String deviceId = "e000000000000021";
 
         private Dictionary<string, dynamic> self;
 
         private Thread m_syncThread;
 
-        private string user_agnet = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.71 Safari/537.36";
+        private string user_agnet = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.103 Safari/537.36";
+
+        private static char[] constant =
+             {
+        '0','1','2','3','4','5','6','7','8','9',
+        'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z',
+        'A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'
+      };
+        public static string GenerateRandomNumber(int Length)
+        {
+            System.Text.StringBuilder newRandom = new System.Text.StringBuilder(62);
+            Random rd = new Random();
+            for (int i = 0; i < Length; i++)
+            {
+                newRandom.Append(constant[rd.Next(62)]);
+            }
+            return newRandom.ToString();
+        }
+
 
         public Wechat(PictureBox codeShow) {
             cookieContainer = new CookieContainer();
             qrcode_img = codeShow;
+            deviceId = "e" + GenerateRandomNumber(16);
         }
 
         private string getTimeStamp()
@@ -80,19 +101,21 @@ namespace Wechat
             return false;
         }
 
-        private HttpWebResponse Get(string url, ref string responseText,int timeout = 5) {
+        private HttpWebResponse Get(string url, ref string responseText,int timeout = 10) {
             try
             {
-                var http = WebRequest.Create(url) as HttpWebRequest;
-                http.Method = "Get";
+                var http = WebRequest.CreateHttp(url) as HttpWebRequest;
+                http.Method = "GET";
                 http.Timeout = timeout * 1000;
                 http.CookieContainer = cookieContainer;
                 http.UserAgent = user_agnet;
+                http.Proxy = null;
                 HttpWebResponse response = http.GetResponse() as HttpWebResponse;
                 using (var reader = new StreamReader(response.GetResponseStream(), new UTF8Encoding(true, true)))
                 {
                     responseText = reader.ReadToEnd();
                 }
+                http.Abort();
                 return response;
             }
             catch (WebException e) {
@@ -111,7 +134,7 @@ namespace Wechat
             return response;
         }
 
-        private HttpWebResponse Post(string url,string data, ref Dictionary<string,dynamic> json)
+        private HttpWebResponse Post(string url,string data, ref Dictionary<string,dynamic> json,int timeout = 10)
         {
             try
             {
@@ -122,7 +145,8 @@ namespace Wechat
                 request.Method = "POST";
                 request.ContentLength = byteArray.Length;
                 request.UserAgent = user_agnet;
-
+                request.Timeout = timeout * 10000;
+                request.ServicePoint.Expect100Continue = false;
                 Stream dataStream = request.GetRequestStream();
                 dataStream.Write(byteArray, 0, byteArray.Length);
                 dataStream.Close();
@@ -140,6 +164,7 @@ namespace Wechat
                         }
                     }
                 }
+                request.Abort();
                 var deserializer = new JavaScriptSerializer();
                 json = deserializer.Deserialize<Dictionary<string, dynamic>>(serverResponse);
                 return response;
@@ -256,9 +281,9 @@ namespace Wechat
             Post(url, BaseRequest, ref dic);
             Console.WriteLine(dic);
             self = dic["User"];
-            var tempSynckey = dic["SyncKey"]["List"];
+            this.synckeyObj = dic["SyncKey"];
             synckey = "";
-            foreach(var obj in tempSynckey) {
+            foreach(var obj in synckeyObj["List"]) {
                 synckey += obj["Key"] + "_" + obj["Val"] + "|";
             }
 
@@ -375,11 +400,12 @@ namespace Wechat
 
         private bool syncCheck(ref int selector) {
             var timeStamp = getTimeStamp();
-            string url = "https://" + syncHost + String.Format("/cgi-bin/mmwebwx-bin/synccheck?r={0}&sid={1}&uin={2}&skey={3}&deviceid={4}&synckey={5}&_={6}", timeStamp,wxsid,wxuin,skey,deviceId,synckey,timeStamp);
+            string url = "https://" + syncHost + String.Format("/cgi-bin/mmwebwx-bin/synccheck?r={0}&sid={1}&uin={2}&skey={3}&deviceid={4}&synckey={5}&_={6}", timeStamp,wxsid,wxuin,skey,deviceId,System.Web.HttpUtility.UrlEncode(synckey),timeStamp);
+            Console.WriteLine("sync check url = " + url);
             try
             {
                 string responseText = "";
-                var response = Get(url, ref responseText);
+                var response = Get(url, ref responseText,30);
                 Console.WriteLine("sync check " + responseText);
                 var regex = @"window\.synccheck=\{retcode:""(\d+)"",selector:""(\d+)""\}";
                 var r = new Regex(regex, RegexOptions.None);
@@ -408,6 +434,8 @@ namespace Wechat
                     "wx8.qq.com",
                     "webpush.wx8.qq.com",
                     "qq.com",
+                    "wx.qq.com",
+                    "webpush.wx8.qq.com",
                     "webpush.wx.qq.com",
                     "web2.wechat.com",
                     "webpush.web2.wechat.com",
@@ -419,14 +447,22 @@ namespace Wechat
                     "webpush2.wechat.com",
                     "webpush.wx.qq.com",
                     "webpush2.wx.qq.com" };
+
+            findHost = false;
+            
             for (var i = 0; i < hosts.Length; i++) {
                 syncHost = hosts[i];
-                int selector = 0;
+                selector = 0;
                 if (syncCheck(ref selector)) {
+                    findHost = true;
                     return ;
                 }
             }
         }
+
+        private int selector;
+
+        private bool findHost = false;
 
         private void syncMsg() {
             string url = this.base_url + String.Format("webwxsync?sid={0}&skey={1}&pass_ticket={2}", wxsid, skey, pass_ticket);
@@ -437,23 +473,45 @@ namespace Wechat
             var payload = serializer.Serialize(new
             {
                 BaseRequest = base_req_param,
-                SyncKey = System.Web.HttpUtility.UrlEncode(this.synckey),
-                rr = timestamp
+                SyncKey = synckeyObj,
+                rr = ~timestamp
             });
 
             var dict = new Dictionary<string, dynamic>();
-            Post(url, payload, ref dict);
+            var response = Post(url, payload, ref dict, 10);
+
+            var baseResponse = dict["BaseResponse"];
+            Console.WriteLine("sync wx msg ret = " + baseResponse["Ret"]);
+            if (baseResponse["Ret"] == 0) {
+               
+                synckeyObj = dict["SyncKey"];
+                synckey = "";
+                foreach (var obj in synckeyObj["List"])
+                {
+                    synckey += obj["Key"] + "_" + obj["Val"] + "|";
+                }
+                synckey = synckey.Substring(0, synckey.Length - 1);
+
+                var msgList = dict["AddMsgList"];
+                selector = 0;
+            }
+            response.Close();
         }
 
         private void SyncMsgThread() {
             while (true) {
-                int selector = 0;
-                if (syncCheck(ref selector)) {
-                    if (selector == 2) {
+                if (!findHost)
+                {
+                    testSyncCheck();
+                }
+                else {
+                    if (selector > 0)
+                    {
                         syncMsg();
                     }
+                    syncCheck(ref selector);
                 }
-                Thread.Sleep(5000);
+                Thread.Sleep(1000);
             }
         }
     }
